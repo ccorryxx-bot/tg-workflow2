@@ -183,6 +183,10 @@ class TelegramContactChecker:
             logger.error("Unauthorized")
             return
 
+        # Same threshold sender uses to pick who to message, applied here too now
+        # so low-activity people are gated out at check time, not just send time.
+        min_val = ACTIVITY_LEVELS.get(Config.MIN_ACTIVITY_LEVEL, 0)
+
         run_start = time.monotonic()
         total_checked = 0
         total_found = 0
@@ -215,18 +219,28 @@ class TelegramContactChecker:
                     result = await self.client(ResolvePhoneRequest(phone))
                     if result.users:
                         user = result.users[0]
+                        last_seen_status = str(type(user.status).__name__) if user.status else "UserStatusEmpty"
+                        level = ACTIVITY_LEVELS.get(last_seen_status, 0)
+                        # LastMonth/Empty/Offline (below UserStatusLastWeek by
+                        # default) still get recorded - just not as 'found', so
+                        # they're never picked up by the sender, but the data
+                        # isn't thrown away if the bar gets lowered later.
+                        status = "found" if level >= min_val else "found_inactive"
                         found_updates.append({
                             "id": row["id"],
-                            "status": "found",
+                            "status": status,
                             "user_id": user.id,
                             "username": getattr(user, "username", None),
                             "first_name": getattr(user, "first_name", None),
                             "last_name": getattr(user, "last_name", None),
-                            "last_seen_status": str(type(user.status).__name__) if user.status else "UserStatusEmpty",
+                            "last_seen_status": last_seen_status,
                             "checked_at": datetime.now(timezone.utc).isoformat(),
                         })
-                        total_found += 1
-                        logger.info(f"Found: {phone}")
+                        if status == "found":
+                            total_found += 1
+                            logger.info(f"Found: {phone} ({last_seen_status})")
+                        else:
+                            logger.info(f"Found but inactive, skipped: {phone} ({last_seen_status})")
                     else:
                         notfound_ids.append(row["id"])
                 except PhoneNotOccupiedError:
@@ -294,15 +308,11 @@ class TelegramContactChecker:
             return
         template = template_resp.data[0]
 
-        min_val = ACTIVITY_LEVELS.get(Config.MIN_ACTIVITY_LEVEL, 0)
-        eligible_statuses = [s for s, v in ACTIVITY_LEVELS.items() if v >= min_val]
-
         resp = (
             self.supabase.table("phone_records")
             .select("id, phone, user_id, username, first_name, last_seen_status")
             .eq("status", "found")
             .eq("is_messaged", False)
-            .in_("last_seen_status", eligible_statuses)
             .limit(Config.MESSAGE_BATCH_SIZE)
             .execute()
         )
