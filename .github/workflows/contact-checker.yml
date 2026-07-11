@@ -1,0 +1,30 @@
+name: Telegram Contact Checker
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # Runs daily at 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330 # keeps a margin above MAX_RUNTIME_SECONDS (default 5h)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run Checker
+        env:
+          CHECKER_API_ID: ${{ secrets.CHECKER_API_ID }}
+          CHECKER_API_HASH: ${{ secrets.CHECKER_API_HASH }}
+          CONTACT_CHECKER_SESSION: ${{ secrets.CONTACT_CHECKER_SESSION }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
+          CHECK_DELAY_SECONDS: ${{ secrets.CHECK_DELAY_SECONDS }}
+          CHECKPOINT_INTERVAL: ${{ secrets.CHECKPOINT_INTERVAL }}
+          MAX_RUNTIME_SECONDS: ${{ secrets.MAX_RUNTIME_SECONDS }}
+        run: python main.py --mode check
