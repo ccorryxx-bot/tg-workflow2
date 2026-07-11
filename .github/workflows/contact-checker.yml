@@ -2,7 +2,7 @@ name: Telegram Contact Checker
 
 on:
   schedule:
-    - cron: "0 2 * * *" # Runs daily at 02:00 UTC
+    - cron: "0 0,8,16 * * *" # 3x/day, 8h apart = 5h run + 3h rest each cycle
   workflow_dispatch:
 
 jobs:

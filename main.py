@@ -71,7 +71,6 @@ class Config:
     # job timeout, so a huge BATCH_SIZE can never get killed with nothing saved.
     MAX_RUNTIME_SECONDS = int(os.getenv('MAX_RUNTIME_SECONDS', str(5 * 3600)))
 
-    MESSAGE_TEMPLATE = os.getenv('MESSAGE_TEMPLATE', 'Hello {first_name}!')
     MESSAGE_BATCH_SIZE = int(os.getenv('MESSAGE_BATCH_SIZE', '1'))
     MESSAGE_DELAY_MIN = int(os.getenv('MESSAGE_DELAY_MIN', '10'))
     MESSAGE_DELAY_MAX = int(os.getenv('MESSAGE_DELAY_MAX', '30'))
@@ -245,7 +244,10 @@ class TelegramContactChecker:
                     continue
 
                 total_checked += 1
-                await asyncio.sleep(Config.CHECK_DELAY_SECONDS)
+                # Jittered, not fixed - a bot doing exactly 2.000s between every
+                # lookup for 5 hours straight is a much easier pattern to flag
+                # than one with natural variance.
+                await asyncio.sleep(random.uniform(Config.CHECK_DELAY_SECONDS * 0.7, Config.CHECK_DELAY_SECONDS * 1.4))
 
                 if (time.monotonic() - run_start) > Config.MAX_RUNTIME_SECONDS:
                     stopped_early = True
@@ -268,10 +270,29 @@ class TelegramContactChecker:
         await self.client.disconnect()
 
     async def run_sender(self):
+        # Jittered start so sends don't land at the exact same second every
+        # 15 minutes - a human isn't that precise, a cron job is.
+        startup_jitter = random.uniform(0, 180)
+        logger.info(f"Startup jitter: sleeping {startup_jitter:.0f}s")
+        await asyncio.sleep(startup_jitter)
+
         await self.client.connect()
         if not await self.client.is_user_authorized():
             logger.error("Unauthorized")
             return
+
+        template_resp = (
+            self.supabase.table("message_templates")
+            .select("text_template, photo_url, voice_url")
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+        if not template_resp.data:
+            logger.error("No active row in message_templates - nothing to send.")
+            await self.client.disconnect()
+            return
+        template = template_resp.data[0]
 
         min_val = ACTIVITY_LEVELS.get(Config.MIN_ACTIVITY_LEVEL, 0)
         eligible_statuses = [s for s, v in ACTIVITY_LEVELS.items() if v >= min_val]
@@ -294,11 +315,24 @@ class TelegramContactChecker:
         sent_count = 0
         for user in batch:
             try:
-                text = Config.MESSAGE_TEMPLATE.format(
+                text = (template.get("text_template") or "").format(
                     username=user.get("username") or "",
                     first_name=user.get("first_name") or "",
                 )
-                await self.client.send_message(int(user["user_id"]), text)
+                photo_url = template.get("photo_url")
+                voice_url = template.get("voice_url")
+
+                if photo_url:
+                    # Passed as a URL string, Telethon sends it as "external"
+                    # media - Telegram's own servers fetch it, no download/
+                    # upload round-trip needed on our end.
+                    await self.client.send_file(int(user["user_id"]), photo_url, caption=text or None)
+                elif voice_url:
+                    await self.client.send_file(int(user["user_id"]), voice_url, voice_note=True)
+                    if text:
+                        await self.client.send_message(int(user["user_id"]), text)
+                else:
+                    await self.client.send_message(int(user["user_id"]), text)
 
                 # The `.eq("is_messaged", False)` guard makes this an atomic
                 # check-and-set: if two sender runs ever overlapped, only one
