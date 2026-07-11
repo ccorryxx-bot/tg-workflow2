@@ -2,7 +2,9 @@ name: Telegram Message Sender
 
 on:
   schedule:
-    - cron: "30 * * * *" # Runs hourly at :30
+    - cron: "*/30 * * * *" # Runs every 30 min - paired with MESSAGE_BATCH_SIZE=1
+    # this sends one message per run instead of a multi-message burst once an
+    # hour, which reads as more natural pacing for a newer sender account.
   workflow_dispatch:
 
 jobs:
@@ -26,4 +28,7 @@ jobs:
           MESSAGE_TEMPLATE: ${{ secrets.MESSAGE_TEMPLATE }}
           MESSAGE_BATCH_SIZE: ${{ secrets.MESSAGE_BATCH_SIZE }}
           MIN_ACTIVITY_LEVEL: ${{ secrets.MIN_ACTIVITY_LEVEL }}
+          MESSAGE_DELAY_MIN: ${{ secrets.MESSAGE_DELAY_MIN }}
+          MESSAGE_DELAY_MAX: ${{ secrets.MESSAGE_DELAY_MAX }}
+          FLOOD_SLEEP_THRESHOLD: ${{ secrets.FLOOD_SLEEP_THRESHOLD }}
         run: python main.py --mode send
