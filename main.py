@@ -39,44 +39,59 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def env_str(name: str, default: str) -> str:
+    val = os.getenv(name, "")
+    return val if val.strip() else default
+
+
+def env_int(name: str, default: int) -> int:
+    val = os.getenv(name, "")
+    return int(val) if val.strip() else default
+
+
+def env_float(name: str, default: float) -> float:
+    val = os.getenv(name, "")
+    return float(val) if val.strip() else default
+
+
 class Config:
     # Contact Checker credentials
-    CHECKER_API_ID = int(os.getenv('CHECKER_API_ID', '0'))
-    CHECKER_API_HASH = os.getenv('CHECKER_API_HASH', '')
-    CONTACT_CHECKER_SESSION = os.getenv('CONTACT_CHECKER_SESSION', '')
+    CHECKER_API_ID = env_int('CHECKER_API_ID', 0)
+    CHECKER_API_HASH = env_str('CHECKER_API_HASH', '')
+    CONTACT_CHECKER_SESSION = env_str('CONTACT_CHECKER_SESSION', '')
 
     # Message Sender credentials
-    SENDER_API_ID = int(os.getenv('SENDER_API_ID', '0'))
-    SENDER_API_HASH = os.getenv('SENDER_API_HASH', '')
-    MESSAGE_SENDER_SESSION = os.getenv('MESSAGE_SENDER_SESSION', '')
+    SENDER_API_ID = env_int('SENDER_API_ID', 0)
+    SENDER_API_HASH = env_str('SENDER_API_HASH', '')
+    MESSAGE_SENDER_SESSION = env_str('MESSAGE_SENDER_SESSION', '')
 
     # Supabase
-    SUPABASE_URL = os.getenv('SUPABASE_URL', '')
-    SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
+    SUPABASE_URL = env_str('SUPABASE_URL', '')
+    SUPABASE_SERVICE_ROLE_KEY = env_str('SUPABASE_SERVICE_ROLE_KEY', '')
 
     # Only read during --mode seed. Not needed for check/send.
-    SHEET_CSV_URL = os.getenv('SHEET_CSV_URL', '')
-    PHONE_COLUMN_INDEX = os.getenv('PHONE_COLUMN_INDEX', '0')
+    SHEET_CSV_URL = env_str('SHEET_CSV_URL', '')
+    PHONE_COLUMN_INDEX = env_str('PHONE_COLUMN_INDEX', '0')
 
     # How many numbers one `check` run is willing to attempt. Kept generous by
     # default because MAX_RUNTIME_SECONDS is the real limiter now, not this count.
-    CHECK_BATCH_SIZE = int(os.getenv('BATCH_SIZE', os.getenv('CHECK_BATCH_SIZE', '50000')))
+    CHECK_BATCH_SIZE = env_int('BATCH_SIZE', env_int('CHECK_BATCH_SIZE', 50000))
     # Delay between individual ResolvePhoneRequest lookups (seconds) - this is what
     # keeps the account looking like normal manual tap-checking, not a scraper.
-    CHECK_DELAY_SECONDS = float(os.getenv('CHECK_DELAY_SECONDS', '2'))
+    CHECK_DELAY_SECONDS = env_float('CHECK_DELAY_SECONDS', 2)
     # Pull + write results back to Supabase every N lookups, so a job timeout or
     # crash mid-run only loses at most this many lookups, never the whole run.
-    CHECKPOINT_INTERVAL = int(os.getenv('CHECKPOINT_INTERVAL', '100'))
+    CHECKPOINT_INTERVAL = env_int('CHECKPOINT_INTERVAL', 100)
     # Hard wall-clock cap per run, safely under GitHub Actions' 360-minute default
     # job timeout, so a huge BATCH_SIZE can never get killed with nothing saved.
-    MAX_RUNTIME_SECONDS = int(os.getenv('MAX_RUNTIME_SECONDS', str(5 * 3600)))
+    MAX_RUNTIME_SECONDS = env_int('MAX_RUNTIME_SECONDS', 5 * 3600)
 
-    MESSAGE_BATCH_SIZE = int(os.getenv('MESSAGE_BATCH_SIZE', '1'))
-    MESSAGE_DELAY_MIN = int(os.getenv('MESSAGE_DELAY_MIN', '10'))
-    MESSAGE_DELAY_MAX = int(os.getenv('MESSAGE_DELAY_MAX', '30'))
+    MESSAGE_BATCH_SIZE = env_int('MESSAGE_BATCH_SIZE', 1)
+    MESSAGE_DELAY_MIN = env_int('MESSAGE_DELAY_MIN', 10)
+    MESSAGE_DELAY_MAX = env_int('MESSAGE_DELAY_MAX', 30)
 
-    FLOOD_SLEEP_THRESHOLD = int(os.getenv('FLOOD_SLEEP_THRESHOLD', '60'))
-    MIN_ACTIVITY_LEVEL = os.getenv('MIN_ACTIVITY_LEVEL', 'UserStatusRecently')
+    FLOOD_SLEEP_THRESHOLD = env_int('FLOOD_SLEEP_THRESHOLD', 60)
+    MIN_ACTIVITY_LEVEL = env_str('MIN_ACTIVITY_LEVEL', 'UserStatusLastWeek')
 
 
 ACTIVITY_LEVELS = {
@@ -325,6 +340,17 @@ class TelegramContactChecker:
         sent_count = 0
         for user in batch:
             try:
+                # user_id/access_hash the checker cached are scoped to the
+                # checker's own Telegram session - they mean nothing to the
+                # sender's separate account. Resolving the phone here, with
+                # the sender's own client, gives Telethon a fresh entity with
+                # an access_hash valid for *this* session before we send.
+                resolved = await self.client(ResolvePhoneRequest(user["phone"]))
+                if not resolved.users:
+                    logger.warning(f"{user['phone']}: not resolvable by sender account, skipping")
+                    continue
+                entity = resolved.users[0]
+
                 text = (template.get("text_template") or "").format(
                     username=user.get("username") or "",
                     first_name=user.get("first_name") or "",
@@ -336,13 +362,13 @@ class TelegramContactChecker:
                     # Passed as a URL string, Telethon sends it as "external"
                     # media - Telegram's own servers fetch it, no download/
                     # upload round-trip needed on our end.
-                    await self.client.send_file(int(user["user_id"]), photo_url, caption=text or None)
+                    await self.client.send_file(entity, photo_url, caption=text or None)
                 elif voice_url:
-                    await self.client.send_file(int(user["user_id"]), voice_url, voice_note=True)
+                    await self.client.send_file(entity, voice_url, voice_note=True)
                     if text:
-                        await self.client.send_message(int(user["user_id"]), text)
+                        await self.client.send_message(entity, text)
                 else:
-                    await self.client.send_message(int(user["user_id"]), text)
+                    await self.client.send_message(entity, text)
 
                 # The `.eq("is_messaged", False)` guard makes this an atomic
                 # check-and-set: if two sender runs ever overlapped, only one
