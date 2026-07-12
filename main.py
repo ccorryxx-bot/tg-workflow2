@@ -93,33 +93,22 @@ class Config:
     FLOOD_SLEEP_THRESHOLD = env_int('FLOOD_SLEEP_THRESHOLD', 60)
     MIN_ACTIVITY_LEVEL = env_str('MIN_ACTIVITY_LEVEL', 'UserStatusLastWeek')
 
-    # Comma-separated phone numbers known FOR CERTAIN to be on Telegram (your
-    # own number, a close contact who's active). Used to detect a restricted/
-    # shadow-blocked checker account before it silently mislabels real users
-    # as 'not_found'.
-    CANARY_PHONES = env_str('CANARY_PHONES', '')
+    # Safety net for a restricted/shadow-blocked account: after checking at
+    # least this many numbers in a run, if the found-rate falls below the
+    # floor below, stop - a real 0% segment is possible but statistically
+    # very unlikely (at a normal ~7% baseline, 0 hits in 300 has ~1-in-1500
+    # odds by chance alone). This replaced a canary-number approach, which
+    # had a real blind spot: a number with any prior relationship to the
+    # checker account can stay visible even when the account can't see
+    # strangers at all, so it can report "healthy" while actually broken.
+    MIN_HITRATE_SAMPLE = env_int('MIN_HITRATE_SAMPLE', 300)
+    MIN_HITRATE_PERCENT = env_float('MIN_HITRATE_PERCENT', 1.0)
 
 
 ACTIVITY_LEVELS = {
     "UserStatusOnline": 4, "UserStatusRecently": 3, "UserStatusLastWeek": 2,
     "UserStatusLastMonth": 1, "UserStatusEmpty": 0, "UserStatusOffline": 0,
 }
-
-
-async def account_is_healthy(client) -> bool:
-    """Resolve known-good numbers to check the account isn't shadow-restricted.
-    No canaries configured -> can't verify, assume healthy (opt-in safety net)."""
-    canaries = [p.strip() for p in Config.CANARY_PHONES.split(',') if p.strip()]
-    if not canaries:
-        return True
-    for phone in canaries:
-        try:
-            result = await client(ResolvePhoneRequest(phone))
-            if result.users:
-                return True
-        except Exception:
-            continue
-    return False
 
 
 def get_supabase() -> Client:
@@ -228,17 +217,29 @@ class TelegramContactChecker:
         total_checked = 0
         total_found = 0
         stopped_early = False
-
-        if not await account_is_healthy(self.client):
-            logger.error("Canary check failed before starting - this account isn't resolving known-good numbers. Stopping without touching any pending numbers.")
-            await self.client.disconnect()
-            return
+        run_notfound_ids: List[int] = []
 
         while total_checked < Config.CHECK_BATCH_SIZE:
-            if not await account_is_healthy(self.client):
-                logger.error(f"Canary check failed after {total_checked} lookups this run - account looks restricted. Stopping before more pending numbers get mislabeled.")
-                stopped_early = True
-                break
+            if total_checked >= Config.MIN_HITRATE_SAMPLE:
+                hit_rate = (total_found / total_checked) * 100
+                if hit_rate < Config.MIN_HITRATE_PERCENT:
+                    logger.error(
+                        f"Hit-rate anomaly: {total_found}/{total_checked} found "
+                        f"({hit_rate:.2f}%), below the {Config.MIN_HITRATE_PERCENT}% floor. "
+                        f"Stopping - this segment being genuinely near-empty is possible but "
+                        f"statistically very unlikely; more often it means the account itself "
+                        f"can't see strangers right now, not that these numbers aren't real."
+                    )
+                    # Everything this run marked not_found is equally suspect
+                    # (same account) - revert it to pending for a fair recheck
+                    # instead of leaving it mislabeled like last time.
+                    if run_notfound_ids:
+                        self.supabase.table("phone_records").update({
+                            "status": "pending", "checked_at": None,
+                        }).in_("id", run_notfound_ids).execute()
+                        logger.warning(f"Reverted {len(run_notfound_ids)} not_found results from this run back to pending.")
+                    stopped_early = True
+                    break
 
             take = min(Config.CHECKPOINT_INTERVAL, Config.CHECK_BATCH_SIZE - total_checked)
             resp = (
@@ -322,6 +323,7 @@ class TelegramContactChecker:
                     "status": "not_found",
                     "checked_at": datetime.now(timezone.utc).isoformat(),
                 }).in_("id", notfound_ids).execute()
+                run_notfound_ids.extend(notfound_ids)
 
             if stopped_early:
                 logger.warning(f"Runtime budget reached after checking {total_checked} numbers this run.")
