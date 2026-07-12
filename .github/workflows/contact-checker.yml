@@ -2,7 +2,9 @@ name: Telegram Contact Checker
 
 on:
   schedule:
-    - cron: "0 0,8,16 * * *" # 3x/day, 8h apart = 5h run + 3h rest each cycle
+    - cron: "7 0,8,16 * * *" # offset 7 min past the hour - :00 is GitHub's most
+    # congested minute (every cron job on the platform tends to land there),
+    # which raises the odds of a scheduled run getting delayed or dropped.
   workflow_dispatch:
 
 jobs:
