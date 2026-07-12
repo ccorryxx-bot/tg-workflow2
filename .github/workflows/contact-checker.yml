@@ -29,4 +29,5 @@ jobs:
           CHECK_DELAY_SECONDS: ${{ secrets.CHECK_DELAY_SECONDS }}
           CHECKPOINT_INTERVAL: ${{ secrets.CHECKPOINT_INTERVAL }}
           MAX_RUNTIME_SECONDS: ${{ secrets.MAX_RUNTIME_SECONDS }}
+          CANARY_PHONES: ${{ secrets.CANARY_PHONES }}
         run: python main.py --mode check

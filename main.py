@@ -93,11 +93,33 @@ class Config:
     FLOOD_SLEEP_THRESHOLD = env_int('FLOOD_SLEEP_THRESHOLD', 60)
     MIN_ACTIVITY_LEVEL = env_str('MIN_ACTIVITY_LEVEL', 'UserStatusLastWeek')
 
+    # Comma-separated phone numbers known FOR CERTAIN to be on Telegram (your
+    # own number, a close contact who's active). Used to detect a restricted/
+    # shadow-blocked checker account before it silently mislabels real users
+    # as 'not_found'.
+    CANARY_PHONES = env_str('CANARY_PHONES', '')
+
 
 ACTIVITY_LEVELS = {
     "UserStatusOnline": 4, "UserStatusRecently": 3, "UserStatusLastWeek": 2,
     "UserStatusLastMonth": 1, "UserStatusEmpty": 0, "UserStatusOffline": 0,
 }
+
+
+async def account_is_healthy(client) -> bool:
+    """Resolve known-good numbers to check the account isn't shadow-restricted.
+    No canaries configured -> can't verify, assume healthy (opt-in safety net)."""
+    canaries = [p.strip() for p in Config.CANARY_PHONES.split(',') if p.strip()]
+    if not canaries:
+        return True
+    for phone in canaries:
+        try:
+            result = await client(ResolvePhoneRequest(phone))
+            if result.users:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def get_supabase() -> Client:
@@ -207,7 +229,17 @@ class TelegramContactChecker:
         total_found = 0
         stopped_early = False
 
+        if not await account_is_healthy(self.client):
+            logger.error("Canary check failed before starting - this account isn't resolving known-good numbers. Stopping without touching any pending numbers.")
+            await self.client.disconnect()
+            return
+
         while total_checked < Config.CHECK_BATCH_SIZE:
+            if not await account_is_healthy(self.client):
+                logger.error(f"Canary check failed after {total_checked} lookups this run - account looks restricted. Stopping before more pending numbers get mislabeled.")
+                stopped_early = True
+                break
+
             take = min(Config.CHECKPOINT_INTERVAL, Config.CHECK_BATCH_SIZE - total_checked)
             resp = (
                 self.supabase.table("phone_records")
