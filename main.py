@@ -276,6 +276,7 @@ class TelegramContactChecker:
                         status = "found" if level >= min_val else "found_inactive"
                         found_updates.append({
                             "id": row["id"],
+                            "phone": phone,
                             "status": status,
                             "user_id": user.id,
                             "username": getattr(user, "username", None),
