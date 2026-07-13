@@ -381,11 +381,15 @@ class TelegramContactChecker:
             return
         template = template_resp.data[0]
 
+        # send_queue is now the sender's sole source of truth - a human curates
+        # this list from the dashboard, so the sender never auto-picks anyone
+        # straight out of phone_records anymore. Decoupled from the checker on
+        # purpose: checker findings and "who actually gets messaged" are two
+        # separate decisions now, not one automatic pipeline.
         resp = (
-            self.supabase.table("phone_records")
-            .select("id, phone, user_id, username, first_name, last_seen_status")
-            .eq("status", "found")
-            .eq("is_messaged", False)
+            self.supabase.table("send_queue")
+            .select("id, phone, username, first_name")
+            .eq("status", "queued")
             .limit(Config.MESSAGE_BATCH_SIZE)
             .execute()
         )
@@ -406,6 +410,10 @@ class TelegramContactChecker:
                 resolved = await self.client(ResolvePhoneRequest(user["phone"]))
                 if not resolved.users:
                     logger.warning(f"{user['phone']}: not resolvable by sender account, skipping")
+                    self.supabase.table("send_queue").update({
+                        "status": "failed",
+                        "fail_reason": "not resolvable by sender account",
+                    }).eq("id", user["id"]).execute()
                     continue
                 entity = resolved.users[0]
 
@@ -428,13 +436,13 @@ class TelegramContactChecker:
                 else:
                     await self.client.send_message(entity, text)
 
-                # The `.eq("is_messaged", False)` guard makes this an atomic
+                # The `.eq("status", "queued")` guard makes this an atomic
                 # check-and-set: if two sender runs ever overlapped, only one
                 # of them can win this update, so nobody gets double-messaged.
-                self.supabase.table("phone_records").update({
-                    "is_messaged": True,
-                    "messaged_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", user["id"]).eq("is_messaged", False).execute()
+                self.supabase.table("send_queue").update({
+                    "status": "sent",
+                    "sent_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", user["id"]).eq("status", "queued").execute()
 
                 sent_count += 1
                 logger.info(f"Sent to {user['phone']}")
@@ -442,6 +450,10 @@ class TelegramContactChecker:
                     await asyncio.sleep(random.randint(Config.MESSAGE_DELAY_MIN, Config.MESSAGE_DELAY_MAX))
             except Exception as e:
                 logger.error(f"Failed to send to {user['phone']}: {e}")
+                self.supabase.table("send_queue").update({
+                    "status": "failed",
+                    "fail_reason": str(e)[:500],
+                }).eq("id", user["id"]).execute()
 
         logger.info(f"Attempted {len(batch)} messages, sent {sent_count}.")
         await self.client.disconnect()
