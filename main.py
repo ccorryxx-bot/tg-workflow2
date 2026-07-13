@@ -216,15 +216,16 @@ class TelegramContactChecker:
         run_start = time.monotonic()
         total_checked = 0
         total_found = 0
+        total_resolved = 0
         stopped_early = False
         run_notfound_ids: List[int] = []
 
         while total_checked < Config.CHECK_BATCH_SIZE:
             if total_checked >= Config.MIN_HITRATE_SAMPLE:
-                hit_rate = (total_found / total_checked) * 100
+                hit_rate = (total_resolved / total_checked) * 100
                 if hit_rate < Config.MIN_HITRATE_PERCENT:
                     logger.error(
-                        f"Hit-rate anomaly: {total_found}/{total_checked} found "
+                        f"Hit-rate anomaly: {total_resolved}/{total_checked} resolved "
                         f"({hit_rate:.2f}%), below the {Config.MIN_HITRATE_PERCENT}% floor. "
                         f"Stopping - this segment being genuinely near-empty is possible but "
                         f"statistically very unlikely; more often it means the account itself "
@@ -287,8 +288,10 @@ class TelegramContactChecker:
                         })
                         if status == "found":
                             total_found += 1
+                            total_resolved += 1
                             logger.info(f"Found: {phone} ({last_seen_status})")
                         else:
+                            total_resolved += 1
                             logger.info(f"Found but inactive, skipped: {phone} ({last_seen_status})")
                     else:
                         notfound_ids.append(row["id"])
