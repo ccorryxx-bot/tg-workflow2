@@ -220,6 +220,24 @@ class TelegramContactChecker:
         stopped_early = False
         run_notfound_ids: List[int] = []
 
+        # Random starting point among pending rows, picked once per run. Without
+        # this, the pending select always returns the same lowest-id rows first
+        # (no ORDER BY = stable id order in practice) - so a hit-rate-anomaly
+        # revert just put the checker right back where it started, checking the
+        # same ~300 rows forever instead of ever reaching the rest of the list.
+        min_resp = (
+            self.supabase.table("phone_records")
+            .select("id").eq("status", "pending").order("id").limit(1).execute()
+        )
+        max_resp = (
+            self.supabase.table("phone_records")
+            .select("id").eq("status", "pending").order("id", desc=True).limit(1).execute()
+        )
+        min_id = min_resp.data[0]["id"] if min_resp.data else 0
+        max_id = max_resp.data[0]["id"] if max_resp.data else min_id
+        random_start_id = random.randint(min_id, max_id) if max_id > min_id else min_id
+        logger.info(f"Starting from random id >= {random_start_id} (pending range {min_id}-{max_id})")
+
         while total_checked < Config.CHECK_BATCH_SIZE:
             if total_checked >= Config.MIN_HITRATE_SAMPLE:
                 hit_rate = (total_resolved / total_checked) * 100
@@ -247,12 +265,14 @@ class TelegramContactChecker:
                 self.supabase.table("phone_records")
                 .select("id, phone")
                 .eq("status", "pending")
+                .gte("id", random_start_id)
+                .order("id")
                 .limit(take)
                 .execute()
             )
             rows = resp.data
             if not rows:
-                logger.info("No pending numbers left - full list has been checked.")
+                logger.info("No pending numbers left from the random starting point onward for this run.")
                 break
 
             found_updates = []
