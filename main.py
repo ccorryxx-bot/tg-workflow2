@@ -22,7 +22,7 @@ import os
 import random
 import time
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 
 import requests
@@ -115,6 +115,37 @@ ACTIVITY_LEVELS = {
     "UserStatusOnline": 4, "UserStatusRecently": 3, "UserStatusLastWeek": 2,
     "UserStatusLastMonth": 1, "UserStatusEmpty": 0, "UserStatusOffline": 0,
 }
+
+
+def classify_status(status) -> tuple[str, int]:
+    """Recently/LastWeek/LastMonth are privacy-obfuscated buckets Telegram
+    hands out when a user has restricted who can see their exact last-seen -
+    there's no timestamp inside them, so a static level per bucket is all we
+    can do. UserStatusOffline is different: it only shows up for users who
+    *haven't* restricted last-seen, and it carries the real was_online
+    datetime. Bucketing it by type-name alone (old behavior) threw that
+    timestamp away and scored every UserStatusOffline as level 0, same as
+    UserStatusEmpty (no signal at all) - so someone active yesterday with
+    open privacy scored *worse* than someone last-seen "sometime this month"
+    with restricted privacy. This reads was_online and buckets it on the
+    same day-thresholds the other statuses imply, so open-privacy users get
+    judged on equal footing instead of being penalized for the account
+    being easier to read.
+    """
+    if status is None:
+        return "UserStatusEmpty", 0
+    type_name = type(status).__name__
+    was_online = getattr(status, "was_online", None)
+    if type_name == "UserStatusOffline" and was_online:
+        elapsed = datetime.now(timezone.utc) - was_online
+        if elapsed <= timedelta(days=3):
+            return "UserStatusOffline(<3d)", 3
+        if elapsed <= timedelta(days=7):
+            return "UserStatusOffline(<7d)", 2
+        if elapsed <= timedelta(days=30):
+            return "UserStatusOffline(<30d)", 1
+        return "UserStatusOffline(30d+)", 0
+    return type_name, ACTIVITY_LEVELS.get(type_name, 0)
 
 
 def get_supabase() -> Client:
@@ -297,8 +328,7 @@ class TelegramContactChecker:
                     result = await self.client(ResolvePhoneRequest(phone))
                     if result.users:
                         user = result.users[0]
-                        last_seen_status = str(type(user.status).__name__) if user.status else "UserStatusEmpty"
-                        level = ACTIVITY_LEVELS.get(last_seen_status, 0)
+                        last_seen_status, level = classify_status(user.status)
                         # LastMonth/Empty/Offline (below UserStatusLastWeek by
                         # default) still get recorded - just not as 'found', so
                         # they're never picked up by the sender, but the data
