@@ -79,6 +79,12 @@ class Config:
     # Delay between individual ResolvePhoneRequest lookups (seconds) - this is what
     # keeps the account looking like normal manual tap-checking, not a scraper.
     CHECK_DELAY_SECONDS = env_float('CHECK_DELAY_SECONDS', 2)
+    # Extra pause after fetching a fresh 100-row chunk from Supabase, before
+    # the first Telegram lookup of that chunk. The per-lookup jitter above
+    # already covers gaps *within* a chunk (including after its last item),
+    # so this isn't fixing a real gap - it's adding a second, larger pause
+    # specifically at the chunk boundary for extra margin.
+    CHUNK_DELAY_SECONDS = env_float('CHUNK_DELAY_SECONDS', 10)
     # Pull + write results back to Supabase every N lookups, so a job timeout or
     # crash mid-run only loses at most this many lookups, never the whole run.
     CHECKPOINT_INTERVAL = env_int('CHECKPOINT_INTERVAL', 100)
@@ -274,6 +280,9 @@ class TelegramContactChecker:
             if not rows:
                 logger.info("No pending numbers left from the random starting point onward for this run.")
                 break
+
+            logger.info(f"Fetched {len(rows)} pending numbers, pausing {Config.CHUNK_DELAY_SECONDS}s before checking...")
+            await asyncio.sleep(Config.CHUNK_DELAY_SECONDS)
 
             found_updates = []
             notfound_ids = []
