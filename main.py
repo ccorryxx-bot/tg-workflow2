@@ -29,7 +29,7 @@ import requests
 from supabase import create_client, Client
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, PhoneNotOccupiedError
-from telethon.tl.functions.contacts import ResolvePhoneRequest
+from telethon.tl.functions.contacts import ResolvePhoneRequest, ResolveUsernameRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -443,18 +443,43 @@ class TelegramContactChecker:
             try:
                 # user_id/access_hash the checker cached are scoped to the
                 # checker's own Telegram session - they mean nothing to the
-                # sender's separate account. Resolving the phone here, with
-                # the sender's own client, gives Telethon a fresh entity with
+                # sender's separate account. Resolving here, with the
+                # sender's own client, gives Telethon a fresh entity with
                 # an access_hash valid for *this* session before we send.
-                resolved = await self.client(ResolvePhoneRequest(user["phone"]))
-                if not resolved.users:
-                    logger.warning(f"{user['phone']}: not resolvable by sender account, skipping")
+                entity = None
+                resolve_via = None
+                try:
+                    resolved = await self.client(ResolvePhoneRequest(user["phone"]))
+                    if resolved.users:
+                        entity = resolved.users[0]
+                        resolve_via = "phone"
+                except Exception as e:
+                    logger.warning(f"{user['phone']}: phone resolve failed ({e})")
+
+                # Phone-number lookup is one of the most heavily rate-limited/
+                # monitored actions on Telegram's side (classic scraping
+                # vector), so an account can lose that specific capability
+                # while everything else about it still works fine. Username
+                # resolve is a genuinely different API call - try it before
+                # giving up, for anyone the checker saw a username for.
+                if not entity and user.get("username"):
+                    try:
+                        resolved = await self.client(ResolveUsernameRequest(user["username"]))
+                        if resolved.users:
+                            entity = resolved.users[0]
+                            resolve_via = "username"
+                    except Exception as e:
+                        logger.warning(f"{user['phone']}: username resolve also failed ({e})")
+
+                if not entity:
+                    logger.warning(f"{user['phone']}: not resolvable by sender account (phone or username), skipping")
                     self.supabase.table("send_queue").update({
                         "status": "failed",
-                        "fail_reason": "not resolvable by sender account",
+                        "fail_reason": "not resolvable by sender account (phone and username both failed)",
                     }).eq("id", user["id"]).execute()
                     continue
-                entity = resolved.users[0]
+
+                logger.info(f"{user['phone']}: resolved via {resolve_via}")
 
                 text = (template.get("text_template") or "").format(
                     username=user.get("username") or "",
