@@ -493,6 +493,8 @@ class TelegramContactChecker:
                     # media - Telegram's own servers fetch it, no download/
                     # upload round-trip needed on our end.
                     await self.client.send_file(entity, photo_url, caption=text or None)
+                    if voice_url:
+                        await self.client.send_file(entity, voice_url, voice_note=True)
                 elif voice_url:
                     await self.client.send_file(entity, voice_url, voice_note=True)
                     if text:
